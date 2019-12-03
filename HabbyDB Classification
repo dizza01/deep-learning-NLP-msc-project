@@ -187,11 +187,11 @@ def class_report(X_test, y_test, fitted_model, bs):
 
 
 
-CNN = CNN_deeper_glove(train_sequences_matrix, Y_train)
-class_report(test_sequences_matrix, Y_test, CNN, 15)
+#CNN = CNN_deeper_glove(train_sequences_matrix, Y_train)
+#class_report(test_sequences_matrix, Y_test, CNN, 15)
 
 
-BILSTM = bilstm_attention_glove(train_sequences_matrix, Y_train)
-class_report(test_sequences_matrix,Y_test,BILSTM, 40)
+#BILSTM = bilstm_attention_glove(train_sequences_matrix, Y_train)
+#class_report(test_sequences_matrix,Y_test,BILSTM, 40)
 
 
