@@ -1,0 +1,197 @@
+import os
+import seaborn as sns
+from keras.layers import Conv1D, MaxPooling1D
+from keras.models import Model
+from keras.initializers import Constant
+from keras.callbacks import EarlyStopping
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from keras.optimizers import RMSprop
+from keras.layers import Dense, Input, LSTM, Bidirectional, Flatten, RepeatVector
+from keras.layers import  Activation, Permute
+from keras import backend as K
+from sklearn.preprocessing import LabelEncoder
+from keras.preprocessing.text import Tokenizer
+from keras.preprocessing import sequence
+import keras
+from keras.layers import Embedding
+from sklearn.metrics import accuracy_score
+
+
+
+MAX_SEQUENCE_LENGTH = 150
+MAX_NUM_WORDS = 2000
+
+#Training data
+df = pd.read_csv("labeled_10k.csv")
+
+#Testing data
+df_test = pd.read_csv("labeled_17k.csv",  encoding = "ISO-8859-1")
+
+
+sns.countplot(df.social)
+plt.xlabel('Label')
+plt.title('Number of Yes and No sociality labels')
+# plt.show()
+
+#Prepare training data
+X_train = df.moment
+Y_train = df.social
+le = LabelEncoder()
+Y_train = le.fit_transform(Y_train)
+Y_train = Y_train.reshape(-1,1)
+tok = Tokenizer(num_words=MAX_NUM_WORDS)
+tok.fit_on_texts(X_train)
+sequences = tok.texts_to_sequences(X_train)
+train_sequences_matrix = sequence.pad_sequences(sequences, maxlen=MAX_SEQUENCE_LENGTH)
+word_index = tok.word_index
+
+
+#Prepare testing data
+X_test = df_test.moment
+Y_test = df_test.social
+le = LabelEncoder()
+Y_test = le.fit_transform(Y_test)
+Y_test = Y_test.reshape(-1,1)
+test_sequences = tok.texts_to_sequences(X_test)
+test_sequences_matrix = sequence.pad_sequences(test_sequences,maxlen=MAX_SEQUENCE_LENGTH)
+print("test set counts: ", df_test['social'].value_counts())
+
+
+
+
+# Glove Word embedding
+BASE_DIR = ''
+GLOVE_DIR = os.path.join(BASE_DIR, 'glove')
+TEXT_DATA_DIR = os.path.join(BASE_DIR, '20_newsgroup')
+
+glove_100d = 'glove.6B.100d.txt'
+glove_300d = 'glove.6B.300d.txt'
+
+def load_embedding(embedding):
+    print('Indexing word vectors.')
+    embeddings_index = {}
+    with open(os.path.join(GLOVE_DIR, embedding)) as f:
+        for line in f:
+            word, coefs = line.split(maxsplit=1)
+            coefs = np.fromstring(coefs, 'f', sep=' ')
+            embeddings_index[word] = coefs
+    print('Found %s word vectors.' % len(embeddings_index))
+    return embeddings_index
+
+
+
+
+print('Shape of data tensor:', train_sequences_matrix.shape)
+print('Shape of label tensor:', Y_train.shape)
+print('Shape of data tensor:', test_sequences_matrix.shape)
+print('Shape of label tensor:',Y_test.shape)
+
+
+
+def preparing_embedding_matrix(embedding, EMBEDDING_DIM, word_index):
+    print('Preparing embedding matrix.')
+    embeddings_index = load_embedding(embedding)
+    num_words = min(MAX_NUM_WORDS, len(word_index) + 1)
+    embedding_matrix = np.zeros((num_words, EMBEDDING_DIM))
+    for word, i in word_index.items():
+        if i >= MAX_NUM_WORDS:
+            continue
+        embedding_vector = embeddings_index.get(word)
+        if embedding_vector is not None:
+            embedding_matrix[i] = embedding_vector
+    embedding_layer = Embedding(num_words,
+                                EMBEDDING_DIM,
+                                embeddings_initializer=Constant(embedding_matrix),
+                                input_length=MAX_SEQUENCE_LENGTH,
+                                trainable=True)
+
+    sequence_input = Input(shape=(MAX_SEQUENCE_LENGTH,), dtype='int32')
+    embedded_sequences = embedding_layer(sequence_input)
+    return embedded_sequences, sequence_input
+
+
+
+def bilstm_attention_glove(x, y):
+    early_stopping_monitor = EarlyStopping(monitor='val_loss', min_delta=0.0001)
+    embedding = glove_300d
+    EMBEDDING_DIM = 300
+    batch_size = 40
+    optimizer = RMSprop(0.001)
+
+    print("model fitting - attention LSTM with glove network")
+    units = 100
+    embedded_sequences, sequence_input = preparing_embedding_matrix(embedding, EMBEDDING_DIM, word_index)
+    activations = Bidirectional(LSTM(units, dropout=0.4, return_sequences=True, recurrent_dropout = 0.2))(embedded_sequences)
+    attention = Dense(1, activation='tanh')(activations)
+    attention = Flatten()(attention)
+    attention = Activation('softmax')(attention)
+    attention = RepeatVector(units*2)(attention)
+    attention = Permute([2, 1])(attention)
+    sent_representation = keras.layers.Multiply()([activations, attention])
+    sent_representation = keras.layers.Lambda(lambda xin: K.sum(xin, axis=-2), output_shape = (units*2,))(sent_representation)
+    output_layer = Dense(1, activation='sigmoid')(sent_representation)
+    model = Model(input=sequence_input, output=output_layer)
+    model.compile(optimizer=optimizer, loss='binary_crossentropy', metrics=['acc'])
+    model.summary()
+    model.fit(x, y,
+              batch_size=batch_size,
+              validation_split=0.2,
+              epochs=10,callbacks=[early_stopping_monitor]
+             )
+
+    return model
+
+
+def CNN_deeper_glove(X, Y):
+    early_stopping_monitor = EarlyStopping(monitor='val_loss', min_delta=0.0001)
+    embedding = glove_300d
+    EMBEDDING_DIM = 300
+    optimizer = RMSprop()
+    embedded_sequences, sequence_input = preparing_embedding_matrix(embedding, EMBEDDING_DIM, word_index)
+    print("model fitting - CNN deep with glove network")
+    l_cov1 = Conv1D(80, 5, activation='relu')(embedded_sequences)
+    l_pool1 = MaxPooling1D(1)(l_cov1)
+    l_cov2 = Conv1D(80, 5, activation='relu')(l_pool1)
+    l_pool2 = MaxPooling1D(1)(l_cov2)
+    l_cov3 = Conv1D(80, 5, activation='relu')(l_pool2)
+    l_pool3 = MaxPooling1D(1)(l_cov3)
+    l_flat = Flatten()(l_pool3)
+    l_dense = Dense(80, activation='relu')(l_flat)
+    preds = Dense(1, activation='sigmoid')(l_dense)
+    model = Model(sequence_input, preds)
+    model.compile(loss='binary_crossentropy',
+                  optimizer=optimizer,
+                  metrics=['accuracy'])
+    print(model.summary())
+    model.fit(X, Y, batch_size=15, epochs=1,
+              validation_split=0.2, callbacks=[early_stopping_monitor])
+    return model
+
+
+#Final evaluation for the models
+def class_report(X_test, y_test, fitted_model, bs):
+    model = fitted_model
+    pred_val = model.predict(X_test, batch_size=bs, verbose=1)
+    print(pred_val)
+    pred_val = pred_val.round()
+    print(len(pred_val), ", ", pred_val )
+    print(len(y_test), ", ", y_test )
+    from sklearn.metrics import f1_score
+    print("Accuracy: ", accuracy_score(y_test, pred_val))
+    print("f1: ", f1_score(y_test, pred_val))
+
+
+
+
+
+
+CNN = CNN_deeper_glove(train_sequences_matrix, Y_train)
+class_report(test_sequences_matrix, Y_test, CNN, 15)
+
+
+BILSTM = bilstm_attention_glove(train_sequences_matrix, Y_train)
+class_report(test_sequences_matrix,Y_test,BILSTM, 40)
+
+
